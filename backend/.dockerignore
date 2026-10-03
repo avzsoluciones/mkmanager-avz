@@ -1,0 +1,14 @@
+# Fuera de la imagen: entorno virtual, pruebas, caches y cualquier secreto.
+.venv/
+tests/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.env.*
+*.pem
+*.key
+requirements-dev.txt
+Dockerfile
+.dockerignore

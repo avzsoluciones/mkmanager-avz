@@ -1,0 +1,7 @@
+# Fuera de la imagen. mock.js (datos simulados, ?mock=1) no se publica (SEG-026).
+js/mock.js
+assets/brand/LEEME.md
+.dockerignore
+.env
+.env.*
+*.md

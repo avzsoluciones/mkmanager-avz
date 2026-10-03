@@ -1,0 +1,194 @@
+# AVZCloud Central Manager - compose DEFINITIVO para srv-2 (/opt/1panel/apps/mikrotik-manager).
+# Se instala como `docker-compose.yml` junto a `.env`, `backend/` y `frontend-new/`. NO desplegado todavia.
+# Procedimiento completo y reversion: deploy/DEPLOY.md.
+#
+# Principios (cada decision esta comentada donde se aplica):
+#  - Ningun secreto en este archivo: todo viene de `.env` por interpolacion ${VAR}.
+#  - OpenResty (1Panel) es la unica entrada publica; aqui todo se publica solo en 127.0.0.1.
+#  - PostgreSQL no se publica en ningun puerto y vive en una red `internal` (sin salida a Internet).
+#  - Contenedores sin privilegios: sin capacidades, sin escalada, raiz de solo lectura, con limites.
+#  - Se conservan nombres de servicio, contenedor, base y VOLUMEN para no perder datos.
+#  - NO se monta init_postgres.sql: el esquema lo crea la migracion 001 (sin usuarios de demostracion).
+
+# Fija el nombre de proyecto; coincide con el directorio y con el prefijo de la red y del volumen actuales.
+name: mikrotik-manager
+
+# Entorno de la API definido una sola vez (lo reutiliza el servicio `cli`).
+# En vez de `env_file: .env` (que inyectaria TODO el .env, p. ej. variables de otros usos, y
+# quedaria visible en `docker inspect`) se pasa solo lo que el backend lee (app/config.py,
+# services/monitoring.py, services/alerts.py, main.py). `:?` aborta con un mensaje si falta
+# una variable obligatoria; `:-` deja un valor por defecto para las opcionales.
+x-api-env: &api-env
+  POSTGRES_HOST: ${POSTGRES_HOST:-mikrotik-manager-db}
+  POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+  POSTGRES_DB: ${POSTGRES_DB:?defina POSTGRES_DB en .env}
+  POSTGRES_USER: ${POSTGRES_USER:?defina POSTGRES_USER en .env}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD en .env}
+  SECRET_KEY: ${SECRET_KEY:?defina SECRET_KEY en .env}
+  VAULT_KEY: ${VAULT_KEY:?defina VAULT_KEY en .env}
+  TOKEN_HOURS: ${TOKEN_HOURS:-12}
+  CORS_ORIGINS: ${CORS_ORIGINS:-}
+  HUB_HOST: ${HUB_HOST:-}
+  HUB_API_PORT: ${HUB_API_PORT:-8728}
+  HUB_API_USER: ${HUB_API_USER:-}
+  HUB_API_PASSWORD: ${HUB_API_PASSWORD:-}
+  HUB_WG_INTERFACE: ${HUB_WG_INTERFACE:-}
+  HUB_PUBLIC_ENDPOINT: ${HUB_PUBLIC_ENDPOINT:-}
+  HUB_PUBLIC_PORT: ${HUB_PUBLIC_PORT:-51820}
+  EDGE_API_USER: ${EDGE_API_USER:-}
+  EDGE_API_PASSWORD: ${EDGE_API_PASSWORD:-}
+  MONITOR_ENABLED: ${MONITOR_ENABLED:-1}
+  MONITOR_INTERVAL_SECONDS: ${MONITOR_INTERVAL_SECONDS:-60}
+  MONITOR_ONLINE_SECONDS: ${MONITOR_ONLINE_SECONDS:-180}
+  MONITOR_ALERT_MINUTES: ${MONITOR_ALERT_MINUTES:-5}
+  MONITOR_RETENTION_DAYS: ${MONITOR_RETENTION_DAYS:-90}
+  MONITOR_SAMPLE_SECONDS: ${MONITOR_SAMPLE_SECONDS:-300}
+  MONITOR_RX_WINDOW_SECONDS: ${MONITOR_RX_WINDOW_SECONDS:-90}
+  MONITOR_RX_STALE_SECONDS: ${MONITOR_RX_STALE_SECONDS:-300}
+  ALERT_EXTRA_RECIPIENTS: ${ALERT_EXTRA_RECIPIENTS:-}
+  # IP real del cliente (SEG-005): uvicorn solo cree en X-Forwarded-For si la conexion viene de estas IPs.
+  FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-172.29.91.1}
+
+services:
+  # ------------------------------------------------------------------------------------------ BD
+  mikrotik-db:
+    image: postgres:16-alpine           # misma imagen/version que hoy: el volumen es compatible
+    container_name: mikrotik-manager-db # el backend resuelve este nombre (POSTGRES_HOST)
+    restart: unless-stopped
+    environment:
+      # Solo se aplican al CREAR un volumen vacio; con el volumen actual no cambian nada.
+      POSTGRES_DB: ${POSTGRES_DB:?defina POSTGRES_DB en .env}
+      POSTGRES_USER: ${POSTGRES_USER:?defina POSTGRES_USER en .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD en .env}
+    # Contrasenas nuevas con SCRAM (no afecta a las ya guardadas).
+    command: ["postgres", "-c", "password_encryption=scram-sha-256"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # (Sin ./init_postgres.sql: sembraba usuarios de demostracion. SEG-002.)
+    # SIN `ports`: nadie fuera de la red del compose llega a PostgreSQL (hoy publica 5432 al exterior).
+    networks:
+      - db-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    # Endurecimiento. VALIDAR EN LABORATORIO antes de produccion: si el contenedor no arranca,
+    # quitar `read_only` y las lineas de `tmpfs` (ver DEPLOY.md, "Si la BD no arranca").
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run/postgresql:mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]   # el entrypoint de postgres arranca como root y baja a `postgres`
+    mem_limit: 512m
+    pids_limit: 200
+
+  # ------------------------------------------------------------------------------------------ API
+  mikrotik-api:
+    build:
+      context: ./backend
+    image: mikrotik-manager-mikrotik-api      # mismo nombre de imagen que hoy (reversion simple)
+    container_name: mikrotik-manager-api
+    restart: unless-stopped
+    depends_on:
+      mikrotik-db:
+        condition: service_healthy
+    environment:
+      <<: *api-env
+    ports:
+      - "127.0.0.1:8090:8000"                 # solo loopback: OpenResty es la unica entrada
+    networks:
+      - db-net                                # llega a la BD
+      - edge-net                              # sale al hub (10.10.10.3 por eth1) y a SMTP; publica el puerto
+    healthcheck:                               # sin curl: Python (igual que el HEALTHCHECK de la imagen)
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s                        # margen para aplicar migraciones al arrancar
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    mem_limit: 512m
+    pids_limit: 200
+
+  # ------------------------------------------------------------------------------------------ Interfaz
+  mikrotik-frontend:
+    build:
+      context: ./frontend-new                 # interfaz nueva; el directorio ./frontend viejo queda sin uso
+      args:
+        ASSET_VERSION: ${ASSET_VERSION:-1}
+    image: mikrotik-manager-mikrotik-frontend
+    container_name: mikrotik-manager-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8091:8080"                 # nginx sin privilegios escucha en 8080
+    networks:
+      - edge-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    mem_limit: 64m
+    pids_limit: 100
+
+  # ------------------------------------------------------------------------------------------ CLI
+  # Comandos de administracion, bajo demanda (perfil `tools`; `up -d` no lo arranca):
+  #   docker compose --profile tools run --rm cli check-env
+  #   docker compose --profile tools run --rm cli migrate
+  # La contrasena inicial del superadmin NO esta en .env: se pasa solo en el comando (DEPLOY.md).
+  cli:
+    image: mikrotik-manager-mikrotik-api      # misma imagen que la API (se construye con `build mikrotik-api`)
+    pull_policy: never
+    profiles: ["tools"]
+    entrypoint: ["python", "-m", "app.cli"]
+    command: ["check-env"]
+    environment:
+      <<: *api-env
+      ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD:-}
+    networks:
+      - db-net                                # solo necesita la BD
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    mem_limit: 256m
+    pids_limit: 50
+
+volumes:
+  postgres_data:
+    # EXTERNO a proposito: conserva los datos actuales y, si el nombre no existe, compose FALLA
+    # en lugar de crear un volumen vacio (que haria creer que se perdieron los datos). Verificar el
+    # nombre real con `docker volume ls` (DEPLOY.md, paso 2) y reflejarlo en PG_VOLUME_NAME.
+    external: true
+    name: ${PG_VOLUME_NAME:-mikrotik-manager_postgres_data}
+
+networks:
+  # Red interna: sin ruta a Internet ni al host. Solo la API y la CLI alcanzan PostgreSQL.
+  db-net:
+    driver: bridge
+    internal: true
+  # Red con salida: la API necesita llegar al hub (red privada) y al SMTP. Subred fija para que la
+  # pasarela (IP con la que la API ve a OpenResty) sea conocida y se pueda confiar en ella.
+  edge-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${AVZ_EDGE_SUBNET:-172.29.91.0/24}
+          gateway: ${AVZ_EDGE_GATEWAY:-172.29.91.1}
