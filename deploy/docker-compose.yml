@@ -1,26 +1,28 @@
-# AVZCloud Central Manager - compose DEFINITIVO para srv-2 (/opt/1panel/apps/mikrotik-manager).
-# Se instala como `docker-compose.yml` junto a `.env`, `backend/` y `frontend-new/`. NO desplegado todavia.
-# Procedimiento completo y reversion: deploy/DEPLOY.md.
+# AVZCloud Central Manager - compose por defecto: INSTALACION LIMPIA en cualquier servidor Linux con Docker.
+# Procedimiento: deploy/INSTALACION-NUEVO-SERVIDOR.md (script deploy/instalar.sh). Arquitectura: deploy/ARQUITECTURA.md.
+# Para MIGRAR el srv-2 actual (volumen existente, nombres fijos) se agrega el override docker-compose.srv2.yml
+# (runbook deploy/DEPLOY.md): docker compose -f docker-compose.yml -f docker-compose.srv2.yml ...
 #
 # Principios (cada decision esta comentada donde se aplica):
 #  - Ningun secreto en este archivo: todo viene de `.env` por interpolacion ${VAR}.
-#  - OpenResty (1Panel) es la unica entrada publica; aqui todo se publica solo en 127.0.0.1.
+#  - El proxy de entrada (con TLS) es la unica entrada publica; aqui todo se publica solo en loopback por defecto.
 #  - PostgreSQL no se publica en ningun puerto y vive en una red `internal` (sin salida a Internet).
 #  - Contenedores sin privilegios: sin capacidades, sin escalada, raiz de solo lectura, con limites.
-#  - Se conservan nombres de servicio, contenedor, base y VOLUMEN para no perder datos.
 #  - NO se monta init_postgres.sql: el esquema lo crea la migracion 001 (sin usuarios de demostracion).
-
-# Fija el nombre de proyecto; coincide con el directorio y con el prefijo de la red y del volumen actuales.
-name: mikrotik-manager
+#
+# El nombre de proyecto NO se fija aqui: Compose lo deriva de `-p`, de COMPOSE_PROJECT_NAME o del directorio.
+# Asi se puede levantar un segundo stack de prueba en el mismo servidor sin chocar (contenedores, red y volumen
+# llevan el prefijo del proyecto). Los scripts (instalar.sh, respaldo.sh...) usan -p y --env-file ../.env.
+# Los contextos de build son relativos a ESTE archivo (deploy/), por eso `../backend` y `../frontend-new`.
 
 # Entorno de la API definido una sola vez (lo reutiliza el servicio `cli`).
-# En vez de `env_file: .env` (que inyectaria TODO el .env, p. ej. variables de otros usos, y
-# quedaria visible en `docker inspect`) se pasa solo lo que el backend lee (app/config.py,
-# services/monitoring.py, services/alerts.py, main.py). `:?` aborta con un mensaje si falta
-# una variable obligatoria; `:-` deja un valor por defecto para las opcionales.
+# En vez de `env_file: .env` (que inyectaria TODO el .env y quedaria visible en `docker inspect`) se pasa solo
+# lo que el backend lee (app/config.py, services/monitoring.py, services/alerts.py, main.py). `:?` aborta con un
+# mensaje si falta una variable obligatoria; `:-` deja un valor por defecto para las opcionales.
 x-api-env: &api-env
-  POSTGRES_HOST: ${POSTGRES_HOST:-mikrotik-manager-db}
-  POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+  # Host de la BD = NOMBRE DEL SERVICIO (lo resuelve el DNS de Compose en db-net, sin depender del container_name).
+  POSTGRES_HOST: mikrotik-db
+  POSTGRES_PORT: "5432"
   POSTGRES_DB: ${POSTGRES_DB:?defina POSTGRES_DB en .env}
   POSTGRES_USER: ${POSTGRES_USER:?defina POSTGRES_USER en .env}
   POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD en .env}
@@ -47,16 +49,17 @@ x-api-env: &api-env
   MONITOR_RX_STALE_SECONDS: ${MONITOR_RX_STALE_SECONDS:-300}
   ALERT_EXTRA_RECIPIENTS: ${ALERT_EXTRA_RECIPIENTS:-}
   # IP real del cliente (SEG-005): uvicorn solo cree en X-Forwarded-For si la conexion viene de estas IPs.
-  FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-172.29.91.1}
+  # Por defecto = pasarela de edge-net, la IP con la que la API ve al proxy de entrada que llega por loopback.
+  FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-${AVZ_EDGE_GATEWAY:-172.29.91.1}}
 
 services:
   # ------------------------------------------------------------------------------------------ BD
   mikrotik-db:
-    image: postgres:16-alpine           # misma imagen/version que hoy: el volumen es compatible
-    container_name: mikrotik-manager-db # el backend resuelve este nombre (POSTGRES_HOST)
+    image: postgres:16-alpine           # misma version que el srv-2 actual: un volumen migrado es compatible
+    # Sin container_name: Compose lo deriva del proyecto. La API llega por el nombre del servicio.
     restart: unless-stopped
     environment:
-      # Solo se aplican al CREAR un volumen vacio; con el volumen actual no cambian nada.
+      # Solo se aplican al CREAR un volumen vacio; con un volumen existente no cambian nada.
       POSTGRES_DB: ${POSTGRES_DB:?defina POSTGRES_DB en .env}
       POSTGRES_USER: ${POSTGRES_USER:?defina POSTGRES_USER en .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD en .env}
@@ -65,7 +68,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # (Sin ./init_postgres.sql: sembraba usuarios de demostracion. SEG-002.)
-    # SIN `ports`: nadie fuera de la red del compose llega a PostgreSQL (hoy publica 5432 al exterior).
+    # SIN `ports`: nadie fuera de la red del compose llega a PostgreSQL.
     networks:
       - db-net
     healthcheck:
@@ -90,9 +93,8 @@ services:
   # ------------------------------------------------------------------------------------------ API
   mikrotik-api:
     build:
-      context: ./backend
-    image: mikrotik-manager-mikrotik-api      # mismo nombre de imagen que hoy (reversion simple)
-    container_name: mikrotik-manager-api
+      context: ../backend
+    # Sin image ni container_name: Compose usa <proyecto>-mikrotik-api. (El override srv2 fija los nombres actuales.)
     restart: unless-stopped
     depends_on:
       mikrotik-db:
@@ -100,10 +102,10 @@ services:
     environment:
       <<: *api-env
     ports:
-      - "127.0.0.1:8090:8000"                 # solo loopback: OpenResty es la unica entrada
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8090}:8000"   # solo loopback por defecto: el proxy de entrada es la unica entrada
     networks:
       - db-net                                # llega a la BD
-      - edge-net                              # sale al hub (10.10.10.3 por eth1) y a SMTP; publica el puerto
+      - edge-net                              # sale al hub (red privada) y a SMTP; publica el puerto
     healthcheck:                               # sin curl: Python (igual que el HEALTHCHECK de la imagen)
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=4).status == 200 else 1)"]
       interval: 30s
@@ -122,14 +124,12 @@ services:
   # ------------------------------------------------------------------------------------------ Interfaz
   mikrotik-frontend:
     build:
-      context: ./frontend-new                 # interfaz nueva; el directorio ./frontend viejo queda sin uso
+      context: ../frontend-new
       args:
         ASSET_VERSION: ${ASSET_VERSION:-1}
-    image: mikrotik-manager-mikrotik-frontend
-    container_name: mikrotik-manager-frontend
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8091:8080"                 # nginx sin privilegios escucha en 8080
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8091}:8080"   # nginx sin privilegios escucha en 8080
     networks:
       - edge-net
     healthcheck:
@@ -148,12 +148,13 @@ services:
 
   # ------------------------------------------------------------------------------------------ CLI
   # Comandos de administracion, bajo demanda (perfil `tools`; `up -d` no lo arranca):
-  #   docker compose --profile tools run --rm cli check-env
-  #   docker compose --profile tools run --rm cli migrate
-  # La contrasena inicial del superadmin NO esta en .env: se pasa solo en el comando (DEPLOY.md).
+  #   docker compose -p <proyecto> --env-file ../.env --profile tools run --rm cli check-env
+  #   docker compose -p <proyecto> --env-file ../.env --profile tools run --rm cli migrate
+  # La contrasena inicial del superadmin NO esta en .env: se pasa solo en el comando (instalar.sh lo hace).
   cli:
-    image: mikrotik-manager-mikrotik-api      # misma imagen que la API (se construye con `build mikrotik-api`)
-    pull_policy: never
+    # Misma imagen que la API, construida desde el mismo contexto (la cache de Docker evita rehacer capas).
+    build:
+      context: ../backend
     profiles: ["tools"]
     entrypoint: ["python", "-m", "app.cli"]
     command: ["check-env"]
@@ -172,12 +173,9 @@ services:
     pids_limit: 50
 
 volumes:
-  postgres_data:
-    # EXTERNO a proposito: conserva los datos actuales y, si el nombre no existe, compose FALLA
-    # en lugar de crear un volumen vacio (que haria creer que se perdieron los datos). Verificar el
-    # nombre real con `docker volume ls` (DEPLOY.md, paso 2) y reflejarlo en PG_VOLUME_NAME.
-    external: true
-    name: ${PG_VOLUME_NAME:-mikrotik-manager_postgres_data}
+  # Volumen normal con nombre derivado del proyecto (<proyecto>_postgres_data). NUNCA `down -v` en produccion.
+  # Para adoptar el volumen existente del srv-2 se usa docker-compose.srv2.yml (lo declara external).
+  postgres_data: {}
 
 networks:
   # Red interna: sin ruta a Internet ni al host. Solo la API y la CLI alcanzan PostgreSQL.
@@ -185,7 +183,8 @@ networks:
     driver: bridge
     internal: true
   # Red con salida: la API necesita llegar al hub (red privada) y al SMTP. Subred fija para que la
-  # pasarela (IP con la que la API ve a OpenResty) sea conocida y se pueda confiar en ella.
+  # pasarela (IP con la que la API ve al proxy de entrada) sea conocida y se pueda confiar en ella.
+  # Si choca con otra red del servidor: AVZ_EDGE_SUBNET y AVZ_EDGE_GATEWAY en .env (instalar.sh --subred).
   edge-net:
     driver: bridge
     ipam:

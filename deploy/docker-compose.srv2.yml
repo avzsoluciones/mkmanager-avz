@@ -1,0 +1,39 @@
+# Override SOLO para MIGRAR el srv-2 actual (/opt/1panel/apps/mikrotik-manager). No usar en servidores nuevos.
+# Uso (desde $APP_DIR, donde estan docker-compose.yml, este archivo, .env, backend/ y frontend-new/):
+#   docker compose -f docker-compose.yml -f docker-compose.srv2.yml <comando>
+# Que cambia respecto al compose limpio: adopta el volumen de datos existente (external), fija los nombres de
+# contenedor e imagen actuales (reversion simple; el runbook los usa) y apunta los contextos de build a
+# ./backend y ./frontend-new (aqui el compose se copia junto a ellos, no dentro de deploy/).
+# Runbook completo: deploy/DEPLOY.md.
+
+name: mikrotik-manager     # coincide con el directorio y con el prefijo de la red y del volumen actuales
+
+services:
+  mikrotik-db:
+    container_name: mikrotik-manager-db
+
+  mikrotik-api:
+    build:
+      context: ./backend
+    image: mikrotik-manager-mikrotik-api            # mismo nombre de imagen que hoy
+    container_name: mikrotik-manager-api
+
+  mikrotik-frontend:
+    build:
+      context: ./frontend-new
+    image: mikrotik-manager-mikrotik-frontend
+    container_name: mikrotik-manager-frontend
+
+  cli:
+    build:
+      context: ./backend
+    image: mikrotik-manager-mikrotik-api            # misma imagen que la API
+    pull_policy: never
+
+volumes:
+  postgres_data:
+    # EXTERNO a proposito: conserva los datos actuales y, si el nombre no existe, compose FALLA en lugar de
+    # crear un volumen vacio (que haria creer que se perdieron los datos). Verificar el nombre real con
+    # `docker volume ls` (DEPLOY.md, paso 2) y reflejarlo en PG_VOLUME_NAME.
+    external: true
+    name: ${PG_VOLUME_NAME:-mikrotik-manager_postgres_data}
