@@ -13,6 +13,7 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 export default async function sedes(ctx) {
   const canWrite = session.canWrite();
   const canDelete = session.isSuper();
+  const canEdit = ['superadmin', 'soporte', 'partner'].includes(session.role());
   const newBtn = canWrite ? h('button', { class: 'btn btn-primary', type: 'button', onClick: () => openSedeDialog(() => load()) }, icon('plus', { size: 18 }), 'Nueva sede') : null;
   const body = h('div', { class: 'stack' });
   ctx.container.append(pageHeader({ title: 'Sedes', subtitle: 'Los lugares donde están instalados los equipos de tus clientes.', actions: newBtn ? [newBtn] : [] }), body);
@@ -74,8 +75,19 @@ export default async function sedes(ctx) {
 
   const delIcon = (s) => (canDelete ? h('button', { class: 'icon-btn sede-del', type: 'button', title: 'Eliminar sede', 'aria-label': `Eliminar la sede ${s.nombre}`, onClick: () => removeMany([String(s.id)]) }, icon('trash', { size: 18 })) : null);
 
+  /** Tras guardar y recargar la lista, el foco vuelve al botón de editar de la sede guardada. */
+  const afterEdit = async (saved) => {
+    await load();
+    const id = String(saved?.id ?? '');
+    const btn = id ? Array.from(document.querySelectorAll('button[data-sede]')).find((b) => b.dataset.sede === id) : null;
+    if (btn) btn.focus();
+  };
+
+  const editIcon = (s) => (canEdit ? h('button', { class: 'icon-btn sede-edit', type: 'button', title: 'Editar sede', 'aria-label': `Editar la sede ${s.nombre}`, 'data-sede': String(s.id), onClick: () => openSedeDialog(afterEdit, { sede: s }) }, icon('pencil', { size: 18 })) : null);
+
   function card(s) {
-    return h('div', { class: 'sede-wrap' },
+    const ctl = [tools.checkbox(s.id, s.nombre), editIcon(s), delIcon(s)].filter(Boolean);
+    const wrap = h('div', { class: 'sede-wrap' },
       h('a', { class: 'card card-link sede-card', href: `#/equipos?sede=${encodeURIComponent(s.id)}` },
         h('div', { class: 'sede-head' },
           h('span', { class: 'stat-ico tone-red' }, icon('building', { size: 22 })),
@@ -86,7 +98,9 @@ export default async function sedes(ctx) {
         h('div', { class: 'sede-foot' },
           h('span', { class: 'pill pill-muted' }, icon('router', { size: 14 }), plural(s.dispositivos ?? 0, 'equipo', 'equipos')),
           h('span', { class: 'link-more' }, 'Ver equipos', icon('chevron', { size: 16 })))),
-      tools.checkbox(s.id, s.nombre), delIcon(s));
+      ctl.length ? h('div', { class: 'sede-actions' }, ctl) : null);
+    wrap.style.setProperty('--n', String(ctl.length));
+    return wrap;
   }
 
   function row(s) {
@@ -99,7 +113,7 @@ export default async function sedes(ctx) {
           h('span', null, h('small', null, 'Dirección'), s.direccion || '—'),
           h('span', null, h('small', null, 'Contacto'), s.contacto_email || '—')),
         icon('chevron', { size: 18, cls: 'row-chev' })),
-      delIcon(s));
+      editIcon(s), delIcon(s));
   }
 
   function paint() {

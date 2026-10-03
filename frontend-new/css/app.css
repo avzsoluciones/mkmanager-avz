@@ -326,13 +326,13 @@ select.input { appearance: none; padding-right: 40px; background-image: linear-g
 .row-del:hover { color: var(--bad); background: var(--bad-bg); }
 .sede-wrap { position: relative; display: flex; flex-direction: column; min-width: 0; }
 .sede-wrap > .sede-card { flex: 1; }
-.sede-wrap > .sede-del { position: absolute; top: var(--sp-3); right: var(--sp-3); }
+.sede-actions { position: absolute; top: var(--sp-3); right: var(--sp-3); display: flex; align-items: center; gap: var(--sp-1); z-index: 1; }
+.sede-actions .sel-check { margin: 0 8px; }
 .sede-del:hover { color: var(--bad); background: var(--bad-bg); }
-.sede-wrap > .sel-check { position: absolute; top: calc(var(--sp-3) + 8px); right: calc(var(--sp-3) + 44px); z-index: 1; }
 .sel-check { width: 20px; height: 20px; accent-color: var(--brand-1); cursor: pointer; flex: none; }
 .row-li > .sel-check { margin: 0 var(--sp-1); }
 .row-meta.card-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2) var(--sp-3); }
-.sede-wrap .sede-head { padding-right: 76px; }
+.sede-wrap .sede-head { padding-right: calc(var(--n, 1) * 40px + 8px); }
 .list-top { display: flex; justify-content: flex-end; }
 .view-toggle { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--border-strong); border-radius: var(--r-pill); background: var(--surface); }
 .vt-btn { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 14px; border: 0; border-radius: var(--r-pill); background: transparent; color: var(--text-2); font-weight: 600; cursor: pointer; }
@@ -381,6 +381,15 @@ a.row-card:hover { border-color: var(--brand-1); }
   .row-simple .row-chev { grid-column: 3; }
   .row-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .row-actions { justify-content: flex-start; }
+  .row-li { flex-wrap: wrap; }
+  .row-li > .row-card { flex: 1 1 100%; }
+  .row-li > .icon-btn, .row-li > .sel-check { order: 1; }
+  .row-li > .sede-edit { margin-left: auto; }
+}
+@media (pointer: coarse) {
+  .icon-btn { width: 44px; height: 44px; }
+  .sel-check { width: 24px; height: 24px; }
+  .sede-wrap .sede-head { padding-right: calc(var(--n, 1) * 48px + 8px); }
 }
 
 /* ---------- detalle de equipo ---------- */

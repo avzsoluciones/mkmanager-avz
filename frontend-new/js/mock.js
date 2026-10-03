@@ -26,8 +26,8 @@ const db = {
     { id: 4, nombre: 'Laboratorio Miami', partner_id: null, aliado: 'AVZ Cloud', contacto_email: null },
   ],
   sedes: EMPTY ? [] : [
-    { id: 1, nombre: 'Tienda Centro', ciudad: 'Medellín', empresa_id: 1, direccion: 'Cra 49 #52-10, Local 3', contacto_email: 'centro@ejemplo.co', estado: 'activa', partner_id: 1 },
-    { id: 2, nombre: 'Oficina Norte', ciudad: 'Bogotá', empresa_id: 1, direccion: 'Calle 127 #15-20, Of. 402', contacto_email: 'norte@ejemplo.co', estado: 'activa', partner_id: 1 },
+    { id: 1, nombre: 'Tienda Centro', ciudad: 'Medellín', empresa_id: 1, direccion: 'Cra 49 #52-10, Local 3', contacto_nombre: 'Laura Gómez', contacto_telefono: '+57 300 123 4567', contacto_email: 'centro@ejemplo.co', estado: 'activa', partner_id: 1 },
+    { id: 2, nombre: 'Oficina Norte', ciudad: 'Bogotá', empresa_id: 1, direccion: 'Calle 127 #15-20, Of. 402', contacto_nombre: 'Andrés Rojas', contacto_telefono: '+57 310 765 4321', contacto_email: 'norte@ejemplo.co', estado: 'activa', partner_id: 1 },
     { id: 3, nombre: 'Bodega Sur', ciudad: 'Cali', empresa_id: 2, direccion: 'Zona Industrial, Bodega 7', contacto_email: null, estado: 'activa', partner_id: 1 },
     { id: 4, nombre: 'Notaría Sede 1', ciudad: 'Pereira', empresa_id: 3, direccion: 'Cra 8 #20-15', contacto_email: null, estado: 'activa', partner_id: 2 },
     { id: 5, nombre: 'Rack Miami', ciudad: 'Miami', empresa_id: 4, direccion: 'Colocation', contacto_email: null, estado: 'activa', partner_id: null },
@@ -55,7 +55,7 @@ const db = {
   created: {},
 };
 // La demo conserva los cambios al recargar (solo en esta pestaña; se borra al cerrarla).
-const KEY = 'avz_mock_db4' + (EMPTY ? '_vacio' : '');
+const KEY = 'avz_mock_db5' + (EMPTY ? '_vacio' : '');
 try { const saved = sessionStorage.getItem(KEY); if (saved) Object.assign(db, JSON.parse(saved)); } catch { /* sin almacenamiento */ }
 const persist = () => { try { sessionStorage.setItem(KEY, JSON.stringify(db)); } catch { /* sin almacenamiento */ } };
 const sedeName = (id) => (db.sedes.find((s) => s.id === id) || {}).nombre || '';
@@ -274,7 +274,7 @@ function fakeQr(seed) {
 }
 
 /* ---------- rutas ---------- */
-const NEED_WRITE = new Set(['POST', 'DELETE']);
+const NEED_WRITE = new Set(['POST', 'DELETE', 'PATCH']);
 const routes = [];
 const on = (method, rx, fn) => routes.push({ method, rx, fn });
 
@@ -343,6 +343,43 @@ on('DELETE', /^\/sedes\/(\d+)$/, ({ m }) => {
   db.sedes.splice(db.sedes.indexOf(s), 1);
   log('sede_eliminada', `id=${id} nombre=${s.nombre}`);
   return { ok: true };
+});
+on('PATCH', /^\/sedes\/(\d+)$/, ({ m, body }) => {
+  if (!['superadmin', 'soporte', 'partner'].includes(user().role)) throw fail(403, 'Sin permiso.');
+  const s = visibleSedes().find((x) => x.id === Number(m[1]));
+  if (!s) throw fail(404, 'Sede no encontrada.');
+  const errs = [];
+  const CTRL = /[\u0000-\u001f\u007f]/;
+  const MAX = { nombre: 150, ciudad: 100, direccion: 255, contacto_nombre: 150, contacto_telefono: 50, contacto_email: 150 };
+  for (const k of ['nombre', 'ciudad', 'empresa_id']) {
+    if (k in body && body[k] === null) errs.push([[k], `El campo ${k} no puede ser nulo.`, 'value_error']);
+  }
+  const clean = {};
+  for (const k of Object.keys(MAX)) {
+    if (!(k in body) || body[k] === null) continue;
+    const v = String(body[k]).trim();
+    if (CTRL.test(v)) { errs.push([[k], 'No se permiten caracteres de control.', 'value_error']); continue; }
+    if (v.length > MAX[k]) { errs.push([[k], `String should have at most ${MAX[k]} characters`, 'string_too_long']); continue; }
+    if ((k === 'nombre' || k === 'ciudad') && v.length < 2) { errs.push([[k], 'String should have at least 2 characters', 'string_too_short']); continue; }
+    if (k === 'contacto_email' && v && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)) { errs.push([[k], 'El correo no tiene un formato válido.', 'value_error']); continue; }
+    clean[k] = v;
+  }
+  if (errs.length) throw v422(errs);
+  const prev = db.empresas.find((x) => x.id === s.empresa_id);
+  let emp = prev;
+  if (body.empresa_id != null && Number(body.empresa_id) !== s.empresa_id) {
+    emp = visibleEmpresas().find((x) => x.id === Number(body.empresa_id));
+    if (!emp) throw fail(404, 'Empresa no encontrada.');
+    if (emp.partner_id !== s.partner_id) throw fail(422, 'La empresa pertenece a otro aliado.');
+  }
+  const nombre = clean.nombre !== undefined ? clean.nombre : s.nombre;
+  if ((emp.id !== s.empresa_id || nombre.toLowerCase() !== s.nombre.toLowerCase())
+    && db.sedes.some((x) => x.id !== s.id && x.empresa_id === emp.id && x.nombre.toLowerCase() === nombre.toLowerCase())) throw fail(409, 'Ya existe una sede con ese nombre en esa empresa.');
+  s.nombre = nombre; s.empresa_id = emp.id;
+  if (clean.ciudad !== undefined) s.ciudad = clean.ciudad;
+  for (const k of ['direccion', 'contacto_nombre', 'contacto_telefono', 'contacto_email']) if (k in body) s[k] = clean[k] || null;
+  log('sede_editada', `id=${s.id} nombre=${s.nombre} empresa_anterior=${prev ? prev.nombre : ''} empresa=${emp.nombre}`);
+  return { id: s.id, nombre: s.nombre, ciudad: s.ciudad, empresa_id: emp.id, empresa: emp.nombre, estado: s.estado };
 });
 on('POST', /^\/sedes$/, ({ body }) => {
   const errs = [];
